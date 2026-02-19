@@ -1,0 +1,52 @@
+{
+  "name": "@flaggy.io/sdk-js",
+  "version": "1.0.0",
+  "description": "TypeScript SDK for Flaggy.io feature flag management",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "prepublishOnly": "npm run build",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "feature-flags",
+    "feature-toggles",
+    "flaggy",
+    "typescript",
+    "sdk"
+  ],
+  "author": "Flaggy.io",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/flaggy-io/sdk-js"
+  },
+  "homepage": "https://flaggy.io",
+  "bugs": {
+    "url": "https://github.com/flaggy-io/sdk-js/issues"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
