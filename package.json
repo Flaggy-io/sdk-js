@@ -1,6 +1,6 @@
 {
   "name": "@flaggy.io/sdk-js",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "TypeScript SDK for Flaggy.io feature flag management",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -23,6 +23,7 @@
   "keywords": [
     "feature-flags",
     "feature-toggles",
+    "segments",
     "flaggy",
     "typescript",
     "sdk"

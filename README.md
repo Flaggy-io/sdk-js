@@ -1,22 +1,10 @@
-# Flaggy.io Feature Flag SDK
+# Flaggy
 
-A JavaScript / TypeScript SDK for managing feature flags from Flaggy.io that is fully compatible for both client-side (browser) and server-side (Node.js) environments.
-
-## Features
-
-- ✅ **Safe defaults**: Optional default values for graceful handling of new users and network failures
-- ✅ **Auto-environment detection**: Uses localStorage in browsers, in-memory storage in Node.js
-- ✅ **Automatic caching**: Reduces API calls and improves performance
-- ✅ **Auto-refresh**: Refreshes on a 60-second base interval with exponential backoff on failures
-- ✅ **Request deduplication**: Prevents concurrent duplicate API requests
-- ✅ **TypeScript support**: Full type safety
-- ✅ **Environment-based flags**: Support for production, staging, and development environments
-- ✅ **Simple configuration**: Only requires an API key
-- ✅ **Input validation**: Validates API keys and response data
+A JavaScript / TypeScript SDK for managing feature flags and segments from Flaggy.io, fully compatible with both client-side (browser) and server-side (Node.js) environments.
 
 ## Requirements
 
-- **Node.js**: 18.0.0 or higher (required for native `fetch()` API support)
+- **Node.js**: 18.0.0 or higher
 - **Browser**: Any modern browser with ES2020 support
 
 ## Installation
@@ -25,37 +13,54 @@ A JavaScript / TypeScript SDK for managing feature flags from Flaggy.io that is 
 npm install @flaggy.io/sdk-js
 ```
 
-## Client-Side (React)
+## Quick Start
 
-Create a dedicated file (e.g., `src/lib/flaggy.ts`):
+### 1. Create the client
 
 ```typescript
+import { flaggy } from "@flaggy.io/sdk-js";
+
+export const flagClient = flaggy({
+  apiKey: process.env.FLAGGY_API_KEY!,
+});
+```
+
+### 2. Initialize before use
+
+```typescript
+await flagClient.initialize();
+```
+
+This ensures flags are loaded before you start evaluating them. If a warm cache exists (browser), it returns immediately. On Node.js it waits for the first fetch to complete.
+
+### 3. Check a flag
+
+```typescript
+if (flagClient.isEnabled("new-checkout")) {
+  // show new checkout
+}
+```
+
+That's it for simple on/off flags. Read on for environment configuration, segment targeting, and error handling.
+
+---
+
+## Setup by Environment
+
+### React / Browser
+
+```typescript
+// src/lib/flaggy.ts
 import { flaggy } from "@flaggy.io/sdk-js";
 
 export const flagClient = flaggy({
   apiKey: import.meta.env.VITE_FLAGGY_API_KEY!,
   environment: import.meta.env.VITE_ENVIRONMENT,
 });
-
-// Export a wrapper function for cleaner usage throughout your app
-export function featureEnabled(
-  flagName: string,
-  defaultValue?: boolean,
-): boolean {
-  return flagClient.isEnabled(flagName, defaultValue);
-}
 ```
 
-Initialize and wait for flags:
-
 ```tsx
-// src/main.tsx
-import { StrictMode } from "react";
-import { createRoot } from "react-dom/client";
-import "./index.css";
-import App from "./App";
-import { flagClient } from "./lib/flaggy";
-
+// src/main.tsx — await before rendering to avoid flash of wrong content
 await flagClient.initialize();
 
 createRoot(document.getElementById("root")!).render(
@@ -65,268 +70,152 @@ createRoot(document.getElementById("root")!).render(
 );
 ```
 
-Simple usage example:
-
 ```tsx
-import { featureEnabled } from "./lib/flaggy";
-
-export function Header() {
-  // Specify safe default for new users (before flags load)
-  return featureEnabled("new-header", false) ? <NewHeader /> : <OldHeader />;
+// usage anywhere in your app
+if (flagClient.isEnabled("new-header")) {
+  return <NewHeader />;
 }
 ```
 
-## Server-Side (Node.js)
-
-Create a dedicated client file (e.g., `src/lib/flaggy.ts`):
+### Node.js
 
 ```typescript
+// src/lib/flaggy.ts
 import { flaggy } from "@flaggy.io/sdk-js";
 
 export const flagClient = flaggy({
   apiKey: process.env.FLAGGY_API_KEY!,
   environment: process.env.NODE_ENV,
 });
-
-// Export a wrapper function for cleaner usage
-export function featureEnabled(
-  flagName: string,
-  defaultValue?: boolean,
-): boolean {
-  return flagClient.isEnabled(flagName, defaultValue);
-}
 ```
-
-Then in your server startup file (e.g., `src/server.ts` or `src/index.ts`), **await the initial flag load before starting your server**:
 
 ```typescript
-import { featureEnabled, flagClient } from "./lib/flaggy";
-import express, { Application, Request, Response } from "express";
+// src/server.ts — await before accepting requests
+await flagClient.initialize();
 
-const app: Application = express();
-const port = process.env.PORT || 3000;
-
-app.get("/", (req: Request, res: Response) => {
-  if (featureEnabled("new-service")) {
-    // Logic for the new service
-  } else {
-    // Logic for the old service
-  }
-});
-
-async function start(): Promise<void> {
-  await flagClient.initialize();
-
-  app.listen(port, () => {
-    console.log(`Server is Fire at http://localhost:${port}`);
-  });
-}
-
-void start();
+app.listen(3000);
 ```
-
-Use throughout your application:
 
 ```typescript
-import { featureEnabled } from "./lib/flaggy";
-
-if (featureEnabled("new-algorithm", true)) {
-  // Defaulting to enabled
+// usage in a route handler
+if (flagClient.isEnabled("new-algorithm")) {
+  // use new algorithm
 }
 ```
 
-To react to fetch errors without throwing, provide an `onError` callback:
+---
+
+## Segment Targeting
+
+Segments let you enable a flag only for users who match specific attributes — for example, users on the `"pro"` plan, or users in a beta programme.
+
+### Passing a context
+
+Instead of a simple flag name, pass a flat key-value `context` describing the current user or request:
+
+```typescript
+const context = {
+  plan: "pro",
+  country: "US",
+  betaOptIn: true,
+};
+
+if (flagClient.isEnabled("new-dashboard", context)) {
+  // only shown to users matching an applicable segment
+}
+```
+
+### How evaluation works
+
+A segment is a set of rules defined in the Flaggy.io dashboard (e.g. `plan equals "pro"`). When you pass a context:
+
+- **All rules in a segment must match** (AND logic within a segment)
+- **Any matching segment enables the flag** (OR logic across segments)
+
+| Step | Condition                           | Result                                  |
+| ---- | ----------------------------------- | --------------------------------------- |
+| 1    | Flag not found                      | `defaultValue` (default: `false`)       |
+| 2    | Flag is disabled                    | `false`                                 |
+| 3    | Flag has no segments                | `true` (global on/off flag)             |
+| 4    | Segments defined, no context passed | `false`                                 |
+| 5    | Context passed                      | `true` if any segment's rules all match |
+
+> **Note:** If a flag has segments but you don't pass a context, it always returns `false`. Always pass a context when evaluating segment-targeted flags.
+
+### Rule operators
+
+Each rule compares a context attribute to a value using one of:
+
+| Operator       | Description                                 |
+| -------------- | ------------------------------------------- |
+| `equals`       | Attribute exactly matches the value         |
+| `not_equals`   | Attribute does not match the value          |
+| `contains`     | Attribute string contains the value         |
+| `not_contains` | Attribute string does not contain the value |
+| `starts_with`  | Attribute string starts with the value      |
+| `ends_with`    | Attribute string ends with the value        |
+
+All attribute values are coerced to strings before comparison. If the attribute is missing from the context, the rule evaluates to `false`.
+
+---
+
+## Configuration Options
 
 ```typescript
 const flagClient = flaggy({
-  apiKey: import.meta.env.VITE_FLAGGY_API_KEY!,
-  onError: (error) => {
-    console.warn("Flag fetch failed:", error);
+  apiKey: "your-api-key", // required
+  environment: "production", // optional — "production" | "staging" | "development", defaults to "production"
+  onError: (err) => {
+    // optional — called on fetch failure, does not throw
+    console.warn(err);
   },
 });
 ```
 
-**Environment:** The `environment` field is optional and defaults to `"production"`. You can pass raw strings (for example `process.env.NODE_ENV` / `import.meta.env.VITE_ENVIRONMENT`), and the SDK will only use `"production"`, `"staging"`, or `"development"`—any other value falls back to `"production"`.
+The `environment` field accepts raw strings like `process.env.NODE_ENV`. Any value other than `"production"`, `"staging"`, or `"development"` falls back to `"production"`.
 
-```typescript
-// Omit entirely (uses "production")
-const flagClient = flaggy({
-  apiKey: import.meta.env.VITE_FLAGGY_API_KEY!,
-});
+---
 
-// Or pass env directly (SDK normalizes invalid values to "production")
-environment: import.meta.env.VITE_ENVIRONMENT,
-```
+## Caching & Refresh
 
-**Network Errors:** The SDK logs fetch errors to the console and invokes the `onError` callback if provided. If the API is unreachable, the SDK will continue to use cached flags and retry on the next refresh interval using exponential backoff (base 60 seconds, capped at 15 minutes).
+The SDK caches flags locally and refreshes them automatically in the background.
 
-**Timeout:** Requests are aborted after 2 seconds to avoid long stalls.
+- **Browser:** Cached in `localStorage`. Loaded immediately on startup; stale cache triggers a background refresh without blocking.
+- **Node.js:** Cached in-memory per process. Empty on restart, so `initialize()` always fetches before resolving.
+
+The refresh interval starts at **60 seconds** and doubles on each failure, capped at **15 minutes**. Request timeouts (3 seconds) also count as failures — this intentionally backs clients off during API outages to aid recovery.
+
+---
 
 ## API Reference
 
-### Configuration
+### `flaggy(config): FeatureFlagClient`
 
-The SDK uses the following hard-coded values:
+Creates (or returns) the global singleton client. Safe to call across modules — subsequent calls return the same instance.
 
-- **API URL**: `https://api.flaggy.io/public/feature-flags`
-- **Storage Key**: `feature-flags`
-- **Refresh Interval**: 60-second base with exponential backoff on failures (capped at 15 minutes)
-- **Authentication**: `x-api-key` header
+### `client.initialize(): Promise<void>`
 
-### Feature Flag Structure
+Ensures flags are ready. Call once at application startup before evaluating any flags.
 
-Each feature flag has the following structure:
+### `client.isEnabled(flagName, context?, defaultValue?): boolean`
 
-```typescript
-interface FeatureFlag {
-  key: string;
-  enabled_production: boolean;
-  enabled_staging: boolean;
-  enabled_development: boolean;
-}
-```
+Evaluates a flag. Returns `defaultValue` (`false` by default) if the flag doesn't exist.
 
-This allows the same flag to have different states across different environments.
+### `client.getAllFlags(): Record<string, FeatureFlag>`
 
-### `flaggy(config: FeatureFlagConfig): FeatureFlagClient`
+Returns a shallow copy of all currently cached flags.
 
-Initialize the global feature flag client with your API key and environment.
+---
 
-**Factory-only:** `FeatureFlagClient` is not exported, so clients must be created via `flaggy()`.
+## Features
 
-**Singleton Behavior:** Multiple calls to `flaggy()` return the same instance. This makes it safe to call in React components that re-render, and prevents duplicate API requests and race conditions.
-
-**Auto-initialization:** Flags are automatically fetched in the background when you instantiate the client via `flaggy()`. The client loads from cache immediately if available and auto-refreshes on a 60-second base interval with exponential backoff on failures.
-
-**React / Client-Side:** Call `await client.initialize()` before rendering your app. If cached flags exist in localStorage, `initialize()` returns immediately without blocking—preventing flash screens on page refresh. If no cache exists, it waits up to 2 seconds for the initial fetch.
-
-**Node.js / Server Startup:** Call `await client.initialize()` before starting your server. Since the in-memory cache is empty on server restart, `initialize()` will wait up to 2 seconds for the initial fetch to ensure flags are available before accepting requests.
-
-**Config Options:**
-
-- `apiKey` (required): Your Flaggy.io API key for authentication
-- `environment` (optional): Accepts any string input (e.g. `process.env.NODE_ENV`), but only `'production'`, `'staging'`, and `'development'` are used; all other values default to `'production'`.
-- `onError` (optional): Callback invoked when a flag fetch fails. Does not throw.
-
-**Returns:** `FeatureFlagClient` instance
-
-**Important:** Configuration is locked after the first call. Subsequent calls with different config values will return the existing instance with the original configuration.
-
-## Client API (returned by `flaggy()`)
-
-**Caching behavior:**
-
-- **Client-side (React/browser):** Flags are loaded from localStorage immediately on instantiation. If cache is stale (> 60 seconds), a background fetch updates the flags without blocking.
-- **Server-side (Node.js):** In-memory cache is empty on server restart, so `initialize()` should be awaited to ensure flags are loaded before serving requests.
-- All flag evaluations (`isEnabled()`, `getFlag()`) trigger automatic background refreshes when the cache interval expires.
-
-### `isEnabled(flagName: string, defaultValue?: boolean): boolean`
-
-Check if a feature flag is enabled for the configured environment.
-
-**Parameters:**
-
-- `flagName`: The key of the feature flag to check
-- `defaultValue`: Optional default value to return if flag doesn't exist or isn't loaded yet (defaults to `false`)
-
-**Returns:** `boolean` - Whether the flag is enabled
-
-**Example:**
-
-```typescript
-// Safe default for new users (flag not loaded yet)
-if (flagClient.isEnabled("new-ui", false)) {
-  // Show new UI only if flag exists and is enabled
-}
-
-// Default to enabled for opt-out features
-if (flagClient.isEnabled("analytics", true)) {
-  // Analytics enabled unless explicitly disabled
-}
-```
-
-**Best Practice:** Always specify a safe default value that provides the correct experience for new users before flags load, or during network failures.
-
-### `getFlag(flagName: string): FeatureFlag | undefined`
-
-Get the full feature flag object with all environment states.
-
-### `getAllFlags(): FeatureFlag[]`
-
-Get all cached feature flags.
-
-### `initialize(): Promise<void>`
-
-Initialize the feature flag client. **This is the recommended method to call during application startup.**
-
-**Behavior:**
-
-- **If cached flags exist** (React/browser with localStorage): Returns immediately without fetching or blocking
-- **If no cache exists** (Node.js server startup or first-time browser load): Waits up to 2 seconds for the initial fetch, then resolves even if the request hasn't finished
-
-```typescript
-// React: instant return if cache exists, prevents flash screen
-await flagClient.initialize();
-
-// Node.js: waits for initial fetch since cache is always empty on restart
-await flagClient.initialize();
-```
-
-**Use cases:**
-
-- React/browser: Prevents blocking on page refresh when flags are cached
-- Node.js: Ensures flags are loaded before accepting requests
-
-### `async fetchFlags(): Promise<void>`
-
-Manually fetch flags from the API. Use this for manual refreshes after the initial setup.
-
-**Rate Limiting:** Respects the refresh interval. Multiple calls within the interval will return immediately without fetching. The interval uses a 60-second base and exponential backoff on failures (capped at 15 minutes).
-
-**Use cases:**
-
-- Manual refresh outside the automatic 60-second interval
-- Testing scenarios where you need deterministic flag state
-
-**Note:** `fetchFlags()` always respects the refresh interval. There is no force-refresh API; after calling `clearCache()`, the SDK will refresh on the next interval or when `initialize()` decides a fetch is needed.
-
-### `clearCache(): void`
-
-Clear all cached flags.
-
-### `getRefreshIntervalMs(): number`
-
-Returns the current refresh interval in milliseconds. The SDK uses a 60-second base interval and applies exponential backoff on failures, capped at 15 minutes.
-
-## API Response Format
-
-The Flaggy.io API returns feature flags in the following format:
-
-```json
-{
-  "data": [
-    {
-      "key": "dark-mode",
-      "enabled_production": true,
-      "enabled_staging": true,
-      "enabled_development": true
-    },
-    {
-      "key": "new-feature",
-      "enabled_production": false,
-      "enabled_staging": true,
-      "enabled_development": true
-    }
-  ]
-}
-```
-
-The SDK automatically:
-
-- Validates the API response structure
-- Filters out invalid flags
-- Checks the appropriate `enabled_*` field based on your configured environment
-- Sends your API key in the `x-api-key` header
+- ✅ Simple on/off flags and segment targeting
+- ✅ Auto-environment detection (localStorage in browser, in-memory on Node.js)
+- ✅ Automatic background refresh with exponential backoff
+- ✅ Request deduplication — no concurrent duplicate fetches
+- ✅ Full TypeScript types
+- ✅ Prototype-pollution-safe response handling
+- ✅ Structural validation of all API responses
 
 ## License
 
