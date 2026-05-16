@@ -127,20 +127,23 @@ if (flagClient.isEnabled("new-dashboard", context)) {
 
 ### How evaluation works
 
-A segment is a set of rules defined in the Flaggy.io dashboard (e.g. `plan equals "pro"`). When you pass a context:
+A segment is a set of rules defined in the Flaggy.io dashboard (e.g. `plan equals "pro"`). Flags have prioritised targeting rules, each pointing to a segment and a rollout percentage. When you pass a context:
 
 - **All rules in a segment must match** (AND logic within a segment)
-- **Any matching segment enables the flag** (OR logic across segments)
+- **Targeting rules are evaluated in priority order** — the first matching segment wins
+- **Rollout percentage controls what fraction of matched users see the flag** — bucketing is deterministic, so the same user always gets the same result
 
-| Step | Condition                           | Result                                  |
-| ---- | ----------------------------------- | --------------------------------------- |
-| 1    | Flag not found                      | `defaultValue` (default: `false`)       |
-| 2    | Flag is disabled                    | `false`                                 |
-| 3    | Flag has no segments                | `true` (global on/off flag)             |
-| 4    | Segments defined, no context passed | `false`                                 |
-| 5    | Context passed                      | `true` if any segment's rules all match |
+| Step | Condition                                          | Result                                        |
+| ---- | -------------------------------------------------- | --------------------------------------------- |
+| 1    | Flag not found                                     | `defaultValue` (default: `false`)             |
+| 2    | Flag is disabled                                   | `false`                                       |
+| 3    | Flag has no targeting rules                        | `true` (global on/off flag)                   |
+| 4    | Targeting rules defined, no context passed         | `false`                                       |
+| 5    | Context passed, no targeting rule's segment matches | `false`                                      |
+| 6    | Segment matches, user outside rollout percentage   | `false`                                       |
+| 7    | Segment matches, user inside rollout percentage    | `true`                                        |
 
-> **Note:** If a flag has segments but you don't pass a context, it always returns `false`. Always pass a context when evaluating segment-targeted flags.
+> **Note:** If a flag has targeting rules but you don't pass a context, it always returns `false`. Always pass a context when evaluating targeted flags.
 
 ### Rule operators
 
@@ -210,6 +213,8 @@ Returns a shallow copy of all currently cached flags.
 ## Features
 
 - ✅ Simple on/off flags and segment targeting
+- ✅ Priority-ordered targeting rules with rollout percentage
+- ✅ Sticky bucketing — same user always gets the same result (MurmurHash3)
 - ✅ Auto-environment detection (localStorage in browser, in-memory on Node.js)
 - ✅ Automatic background refresh with exponential backoff
 - ✅ Request deduplication — no concurrent duplicate fetches

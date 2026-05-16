@@ -1,6 +1,12 @@
+export interface TargetingRule {
+  priority: number;
+  segment_key: string;
+  rollout_percentage: number;
+}
+
 export interface FeatureFlag {
   enabled: boolean;
-  applicable_segments: string[];
+  targeting: TargetingRule[];
 }
 
 export type Operator =
@@ -189,10 +195,22 @@ class FeatureFlagClient {
       return false;
     }
     return (
-      Object.values(data.flags).every(this.isValidFlag) &&
+      Object.values(data.flags).every((f) => this.isValidFlag(f)) &&
       Object.values(data.segments).every(
         (rules) => Array.isArray(rules) && rules.every(this.isValidSegmentRule),
       )
+    );
+  }
+
+  private isValidTargetingRule(rule: unknown): rule is TargetingRule {
+    return (
+      rule !== null &&
+      typeof rule === "object" &&
+      typeof (rule as Record<string, unknown>)["priority"] === "number" &&
+      typeof (rule as Record<string, unknown>)["segment_key"] === "string" &&
+      typeof (rule as Record<string, unknown>)["rollout_percentage"] === "number" &&
+      (rule as Record<string, unknown>)["rollout_percentage"] as number >= 0 &&
+      (rule as Record<string, unknown>)["rollout_percentage"] as number <= 100
     );
   }
 
@@ -201,10 +219,10 @@ class FeatureFlagClient {
       flag !== null &&
       typeof flag === "object" &&
       typeof (flag as Record<string, unknown>)["enabled"] === "boolean" &&
-      Array.isArray((flag as Record<string, unknown>)["applicable_segments"]) &&
-      (
-        (flag as Record<string, unknown>)["applicable_segments"] as unknown[]
-      ).every((s) => typeof s === "string")
+      Array.isArray((flag as Record<string, unknown>)["targeting"]) &&
+      ((flag as Record<string, unknown>)["targeting"] as unknown[]).every(
+        this.isValidTargetingRule,
+      )
     );
   }
 
@@ -296,7 +314,7 @@ class FeatureFlagClient {
 
     try {
       const response = await fetch(
-        `https://api.flaggy.io/public/projections?environment=${this.environment}`,
+        `https://api.flaggy.io/public/manifest?environment=${this.environment}`,
         {
           method: "GET",
           headers: {
@@ -315,20 +333,14 @@ class FeatureFlagClient {
 
       const json = await response.json();
 
-      // Validate response structure
       if (!json || typeof json !== "object") {
         throw new Error("Invalid API response: expected JSON object");
       }
 
-      const data = json.data;
-      if (!data || typeof data !== "object" || Array.isArray(data)) {
-        throw new Error("Invalid API response: missing or invalid data object");
-      }
-
       if (
-        !data.flags ||
-        typeof data.flags !== "object" ||
-        Array.isArray(data.flags)
+        !json.flags ||
+        typeof json.flags !== "object" ||
+        Array.isArray(json.flags)
       ) {
         throw new Error(
           "Invalid API response: missing or invalid flags object",
@@ -336,9 +348,9 @@ class FeatureFlagClient {
       }
 
       if (
-        !data.segments ||
-        typeof data.segments !== "object" ||
-        Array.isArray(data.segments)
+        !json.segments ||
+        typeof json.segments !== "object" ||
+        Array.isArray(json.segments)
       ) {
         throw new Error(
           "Invalid API response: missing or invalid segments object",
@@ -346,14 +358,14 @@ class FeatureFlagClient {
       }
 
       const flags = Object.create(null) as Record<string, FeatureFlag>;
-      for (const [key, value] of Object.entries(data.flags)) {
+      for (const [key, value] of Object.entries(json.flags)) {
         if (this.isValidFlag(value)) {
           flags[key] = value;
         }
       }
 
       const segments = Object.create(null) as Record<string, SegmentRule[]>;
-      for (const [key, value] of Object.entries(data.segments)) {
+      for (const [key, value] of Object.entries(json.segments)) {
         if (Array.isArray(value) && value.every(this.isValidSegmentRule)) {
           segments[key] = value as SegmentRule[];
         }
@@ -366,6 +378,7 @@ class FeatureFlagClient {
       this.saveToCache();
     } catch (error) {
       this.failureCount += 1;
+      this.lastFetch = Date.now();
       const err = error as Error;
       if (this.config.onError) {
         this.config.onError(err);
@@ -417,6 +430,60 @@ class FeatureFlagClient {
     return rules.every((rule) => this.evaluateRule(rule, context));
   }
 
+  private rolloutBucket(flagName: string, context: Context): number {
+    const key =
+      flagName +
+      ":" +
+      Object.entries(context)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([k, v]) => `${k}=${v}`)
+        .join(",");
+
+    // MurmurHash3 32-bit (Austin Appleby), using Math.imul for correct 32-bit multiply
+    const c1 = 0xcc9e2d51;
+    const c2 = 0x1b873593;
+    const remainder = key.length & 3;
+    const bytes = key.length - remainder;
+    let h1 = 0;
+    let i = 0;
+
+    while (i < bytes) {
+      let k1 =
+        (key.charCodeAt(i) & 0xff) |
+        ((key.charCodeAt(i + 1) & 0xff) << 8) |
+        ((key.charCodeAt(i + 2) & 0xff) << 16) |
+        ((key.charCodeAt(i + 3) & 0xff) << 24);
+      i += 4;
+      k1 = Math.imul(k1, c1);
+      k1 = (k1 << 15) | (k1 >>> 17);
+      k1 = Math.imul(k1, c2);
+      h1 ^= k1;
+      h1 = (h1 << 13) | (h1 >>> 19);
+      h1 = (Math.imul(h1, 5) + 0xe6546b64) | 0;
+    }
+
+    let k1 = 0;
+    switch (remainder) {
+      case 3: k1 ^= (key.charCodeAt(i + 2) & 0xff) << 16; // falls through
+      case 2: k1 ^= (key.charCodeAt(i + 1) & 0xff) << 8;  // falls through
+      case 1:
+        k1 ^= key.charCodeAt(i) & 0xff;
+        k1 = Math.imul(k1, c1);
+        k1 = (k1 << 15) | (k1 >>> 17);
+        k1 = Math.imul(k1, c2);
+        h1 ^= k1;
+    }
+
+    h1 ^= key.length;
+    h1 ^= h1 >>> 16;
+    h1 = Math.imul(h1, 0x85ebca6b);
+    h1 ^= h1 >>> 13;
+    h1 = Math.imul(h1, 0xc2b2ae35);
+    h1 ^= h1 >>> 16;
+
+    return (h1 >>> 0) % 100;
+  }
+
   public isEnabled(
     flagName: string,
     context?: Context,
@@ -431,16 +498,21 @@ class FeatureFlagClient {
 
     if (!flag) return defaultValue;
 
-    const applicableSegments = flag.applicable_segments;
-
     if (!flag.enabled) return false;
-    if (applicableSegments.length === 0) return true;
+    if (flag.targeting.length === 0) return true;
     if (!context) return false;
 
-    return applicableSegments.some((segmentKey) => {
-      const rules = this.segments[segmentKey];
-      return rules !== undefined && this.matchesSegment(rules, context);
-    });
+    return flag.targeting
+      .slice()
+      .sort((a, b) => a.priority - b.priority)
+      .some(({ segment_key, rollout_percentage }) => {
+        const rules = this.segments[segment_key];
+        return (
+          rules !== undefined &&
+          this.matchesSegment(rules, context) &&
+          this.rolloutBucket(flagName, context) < rollout_percentage
+        );
+      });
   }
 
   public getAllFlags(): Record<string, FeatureFlag> {
