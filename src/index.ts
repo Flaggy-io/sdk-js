@@ -23,7 +23,10 @@ export interface SegmentRule {
   value: string;
 }
 
-export type Context = Record<string, string | number | boolean>;
+export type Context = { key: string } & Record<
+  string,
+  string | number | boolean
+>;
 
 export interface FeatureFlagConfig {
   apiKey: string;
@@ -31,20 +34,119 @@ export interface FeatureFlagConfig {
   onError?: (error: Error) => void;
 }
 
+// ─── Analytics ────────────────────────────────────────────────────────────────
+
+interface EvaluationEvent {
+  flag_key: string;
+  result: boolean;
+  segment_matched?: string;
+  context_key?: string;
+  evaluated_at?: string;
+}
+
+const BASE_URL = "https://api.flaggy.io";
+const FLUSH_INTERVAL_MS = 5000;
+const FLUSH_THRESHOLD = 100;
+const MAX_BATCH_SIZE = 500;
+const MAX_SEEN_SIZE = 10_000;
+
+class AnalyticsBuffer {
+  private queue: EvaluationEvent[] = [];
+  private seen: Set<string> = new Set();
+  private timer: ReturnType<typeof setInterval> | null = null;
+
+  constructor(
+    private readonly apiKey: string,
+    private readonly environment: string,
+  ) {
+    this.startTimer();
+    this.registerExitHandlers();
+  }
+
+  record(event: EvaluationEvent): void {
+    const dedupeKey = `${event.flag_key}:${event.context_key ?? ""}:${event.result}`;
+    if (this.seen.has(dedupeKey)) return;
+    if (this.seen.size >= MAX_SEEN_SIZE) this.seen.clear();
+    this.seen.add(dedupeKey);
+
+    this.queue.push(event);
+    if (this.queue.length >= FLUSH_THRESHOLD) {
+      this.flush();
+    }
+  }
+
+  flush(): void {
+    if (this.queue.length === 0) return;
+    const batch = this.queue.splice(0, MAX_BATCH_SIZE);
+    this.send(batch);
+  }
+
+  private send(events: EvaluationEvent[]): void {
+    fetch(`${BASE_URL}/public/analytics/events`, {
+      method: "POST",
+      headers: {
+        "x-api-key": this.apiKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ environment: this.environment, events }),
+    }).catch(() => {});
+  }
+
+  private flushViaBeacon(): void {
+    if (this.queue.length === 0) return;
+    const batch = this.queue.splice(0, MAX_BATCH_SIZE);
+    const payload = JSON.stringify({
+      environment: this.environment,
+      events: batch,
+    });
+
+    navigator.sendBeacon(
+      `${BASE_URL}/public/analytics/events`,
+      new Blob([payload], { type: "application/json" }),
+    );
+  }
+
+  private startTimer(): void {
+    this.timer = setInterval(() => this.flush(), FLUSH_INTERVAL_MS);
+    // Prevent the interval from keeping the Node.js process alive
+    if (
+      typeof this.timer === "object" &&
+      this.timer !== null &&
+      "unref" in this.timer
+    ) {
+      (this.timer as { unref(): void }).unref();
+    }
+  }
+
+  private registerExitHandlers(): void {
+    if (typeof window !== "undefined") {
+      window.addEventListener("beforeunload", () => this.flushViaBeacon());
+    }
+  }
+
+  destroy(): void {
+    if (this.timer !== null) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+    this.flush();
+  }
+}
+
+// ─── Storage ──────────────────────────────────────────────────────────────────
+
 interface StorageAdapter {
   get(key: string): CachedData | null;
   set(key: string, value: CachedData): void;
   clear(key: string): void;
 }
 
-// Storage adapter interface
 interface CachedData {
   flags: Record<string, FeatureFlag>;
   segments: Record<string, SegmentRule[]>;
   timestamp: number;
 }
 
-// LocalStorage adapter for browser
 class LocalStorageAdapter implements StorageAdapter {
   get(key: string): CachedData | null {
     if (typeof window === "undefined" || !window.localStorage) {
@@ -82,7 +184,6 @@ class LocalStorageAdapter implements StorageAdapter {
   }
 }
 
-// In-memory adapter for server-side
 class InMemoryStorageAdapter implements StorageAdapter {
   private store: Map<string, CachedData> = new Map();
 
@@ -99,6 +200,8 @@ class InMemoryStorageAdapter implements StorageAdapter {
   }
 }
 
+// ─── Client ───────────────────────────────────────────────────────────────────
+
 class FeatureFlagClient {
   private config: FeatureFlagConfig;
   private storage: StorageAdapter;
@@ -111,9 +214,9 @@ class FeatureFlagClient {
   private failureCount: number = 0;
   private readonly baseRefreshMs: number = 60000;
   private readonly maxRefreshMs: number = 15 * 60 * 1000;
+  private readonly analytics: AnalyticsBuffer;
 
   constructor(config: FeatureFlagConfig) {
-    // Validate API key
     if (!config.apiKey || typeof config.apiKey !== "string") {
       throw new Error("API key is required and must be a non-empty string");
     }
@@ -130,15 +233,13 @@ class FeatureFlagClient {
         ? config.environment
         : "production";
 
-    // Auto-detect environment and use appropriate storage
     this.storage = this.detectEnvironment()
       ? new LocalStorageAdapter()
       : new InMemoryStorageAdapter();
 
-    // Load cached flags on initialization
-    this.loadFromCache();
+    this.analytics = new AnalyticsBuffer(config.apiKey, this.environment);
 
-    // Auto-fetch flags in background (fire and forget)
+    this.loadFromCache();
     this.fetchFlags();
   }
 
@@ -208,9 +309,11 @@ class FeatureFlagClient {
       typeof rule === "object" &&
       typeof (rule as Record<string, unknown>)["priority"] === "number" &&
       typeof (rule as Record<string, unknown>)["segment_key"] === "string" &&
-      typeof (rule as Record<string, unknown>)["rollout_percentage"] === "number" &&
-      (rule as Record<string, unknown>)["rollout_percentage"] as number >= 0 &&
-      (rule as Record<string, unknown>)["rollout_percentage"] as number <= 100
+      typeof (rule as Record<string, unknown>)["rollout_percentage"] ===
+        "number" &&
+      ((rule as Record<string, unknown>)["rollout_percentage"] as number) >=
+        0 &&
+      ((rule as Record<string, unknown>)["rollout_percentage"] as number) <= 100
     );
   }
 
@@ -275,7 +378,6 @@ class FeatureFlagClient {
     return true;
   }
 
-  // Check if cache interval has elapsed and a fetch is needed
   private shouldFetch(): boolean {
     const now = Date.now();
     return now - this.lastFetch > this.getRefreshIntervalMs();
@@ -292,7 +394,6 @@ class FeatureFlagClient {
       return;
     }
 
-    // If already fetching, return the existing promise
     if (this.isFetching && this.fetchPromise) {
       return this.fetchPromise;
     }
@@ -314,7 +415,7 @@ class FeatureFlagClient {
 
     try {
       const response = await fetch(
-        `https://api.flaggy.io/public/manifest?environment=${this.environment}`,
+        `${BASE_URL}/public/manifest?environment=${this.environment}`,
         {
           method: "GET",
           headers: {
@@ -435,6 +536,7 @@ class FeatureFlagClient {
       flagName +
       ":" +
       Object.entries(context)
+        .filter(([k]) => k !== "key")
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([k, v]) => `${k}=${v}`)
         .join(",");
@@ -464,8 +566,10 @@ class FeatureFlagClient {
 
     let k1 = 0;
     switch (remainder) {
-      case 3: k1 ^= (key.charCodeAt(i + 2) & 0xff) << 16; // falls through
-      case 2: k1 ^= (key.charCodeAt(i + 1) & 0xff) << 8;  // falls through
+      case 3:
+        k1 ^= (key.charCodeAt(i + 2) & 0xff) << 16; // falls through
+      case 2:
+        k1 ^= (key.charCodeAt(i + 1) & 0xff) << 8; // falls through
       case 1:
         k1 ^= key.charCodeAt(i) & 0xff;
         k1 = Math.imul(k1, c1);
@@ -484,35 +588,60 @@ class FeatureFlagClient {
     return (h1 >>> 0) % 100;
   }
 
+  private resolve(
+    flagName: string,
+    context: Context | undefined,
+    defaultValue: boolean,
+  ): { result: boolean; segmentMatched: string } {
+    const flag = this.flags[flagName];
+
+    if (!flag) return { result: defaultValue, segmentMatched: "no_match" };
+    if (!flag.enabled) return { result: false, segmentMatched: "no_match" };
+    if (flag.targeting.length === 0)
+      return { result: true, segmentMatched: "no_match" };
+    if (!context) return { result: false, segmentMatched: "no_match" };
+
+    const sorted = flag.targeting
+      .slice()
+      .sort((a, b) => a.priority - b.priority);
+
+    for (const { segment_key, rollout_percentage } of sorted) {
+      const rules = this.segments[segment_key];
+      if (
+        rules !== undefined &&
+        this.matchesSegment(rules, context) &&
+        this.rolloutBucket(flagName, context) < rollout_percentage
+      ) {
+        return { result: true, segmentMatched: segment_key };
+      }
+    }
+
+    return { result: false, segmentMatched: "no_match" };
+  }
+
   public isEnabled(
     flagName: string,
     context?: Context,
     defaultValue: boolean = false,
   ): boolean {
-    // Auto-refresh if needed
     if (this.shouldFetch() && !this.isFetching) {
       this.fetchFlags(); // Fire and forget
     }
 
-    const flag = this.flags[flagName];
+    const { result, segmentMatched } = this.resolve(
+      flagName,
+      context,
+      defaultValue,
+    );
 
-    if (!flag) return defaultValue;
+    this.analytics.record({
+      flag_key: flagName,
+      result,
+      segment_matched: segmentMatched,
+      ...(context?.key !== undefined && { context_key: context.key }),
+    });
 
-    if (!flag.enabled) return false;
-    if (flag.targeting.length === 0) return true;
-    if (!context) return false;
-
-    return flag.targeting
-      .slice()
-      .sort((a, b) => a.priority - b.priority)
-      .some(({ segment_key, rollout_percentage }) => {
-        const rules = this.segments[segment_key];
-        return (
-          rules !== undefined &&
-          this.matchesSegment(rules, context) &&
-          this.rolloutBucket(flagName, context) < rollout_percentage
-        );
-      });
+    return result;
   }
 
   public getAllFlags(): Record<string, FeatureFlag> {
